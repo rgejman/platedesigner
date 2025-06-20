@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Plate Labeler</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: Inter, Helvetica, Arial, sans-serif; }
+  @media print {
+    /* keep controls hidden */
+    #controls, #painting-tools { display: none; }
+    body { margin: 0; }
+
+    /* NEW: force dim + grayscale so empty wells remain visible on printers
+       that drop background colors or ignore opacity */
+    .empty-well {
+      filter: grayscale(100%) opacity(0.35);
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+  }
+  </style>
+</head>
+<body class="bg-slate-50 p-6 min-h-screen flex flex-col items-center text-sm select-none">
+  <div id="root" class="flex-grow flex justify-center"></div>
+  <footer class="mt-6 text-center text-xs text-slate-500 select-none">
+    © Ron&nbsp;S.&nbsp;Gejman · <a href="https://ron.gejman.com" target="_blank" rel="noopener" class="underline hover:text-slate-700">ron.gejman.com</a>
+  </footer>
+
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <script type="text/babel" data-presets="env,react">
+    const { useState, useEffect, useMemo } = React;
+
+    const PLATE_MAP = {6:{rows:2,cols:3},12:{rows:3,cols:4},24:{rows:4,cols:6},48:{rows:6,cols:8},96:{rows:8,cols:12},384:{rows:16,cols:24}};
+    const alpha = n => Array.from({length:n}, (_,i)=>String.fromCharCode(65+i));
+
+    function PlateLabeler(){
+      const [plate,setPlate]=useState(96);
+      const [labels,setLabels]=useState({});
+      const [selecting,setSelecting]=useState(false);
+      const [selection,setSelection]=useState(new Set());
+      const [anchor,setAnchor]=useState(null);
+
+      const [eraser,setEraser]=useState(false);
+      const [paintingErase,setPaintingErase]=useState(false);
+      const [emptyMode,setEmptyMode]=useState(false);
+      const [paintingEmpty,setPaintingEmpty]=useState(false);
+      const [paintFlag,setPaintFlag]=useState(false);
+      const [edgeEmpty,setEdgeEmpty]=useState(false);
+
+      const cfg = PLATE_MAP[plate];
+      const rows = alpha(cfg.rows);
+      const key = (r,c) => `${r}-${c}`;
+      const ensure = (k, p=labels) => ({row:[],col:[],cell:[],empty:false, ...p[k]});
+
+      const hasLabels = useMemo(() => Object.values(labels).some(o => o.row.length || o.col.length || o.cell.length), [labels]);
+
+      const mutate = (keys, fn) => setLabels(prev => {
+        const n = {...prev};
+        keys.forEach(k => { n[k] = ensure(k, prev); fn(n[k]); });
+        return n;
+      });
+
+      const addLabel = (keys, val, type) => { if (!val) return; mutate(keys, o => { if (o.empty) return; o[type] = [...new Set([...o[type], val])]; }); };
+      const clearAllArrays = keys => mutate(keys, o => { o.row=[]; o.col=[]; o.cell=[]; });
+      const clearCellOnly = keys => mutate(keys, o => { o.cell=[]; });
+      const setEmptyFlag = (keys, f) => mutate(keys, o => { o.empty=f; if(f) o.cell=[]; });
+
+      const rowKeys = r => new Set(Array.from({length:cfg.cols}, (_,c) => key(r,c)));
+      const colKeys = c => new Set(Array.from({length:cfg.rows}, (_,r) => key(r,c)));
+
+      const promptSel = keys => {
+        const ex = [...keys].some(k => { const o = labels[k]; return o && (o.cell.length || o.row.length || o.col.length); });
+        const t = prompt(ex ? "Enter label (or 'clear'):" : "Enter label:");
+        if (t === null) return;
+        const v = t.trim();
+        if (v.toLowerCase() === 'clear') clearCellOnly(keys);
+        else if (v) addLabel(keys, v, 'cell');
+      };
+
+      function mDown(e, r, c){
+        e.preventDefault();
+        const k = key(r,c);
+        if (emptyMode) {
+          const will = !ensure(k).empty;
+          setPaintFlag(will);
+          setPaintingEmpty(true);
+          setEmptyFlag(new Set([k]), will);
+          return;
+        }
+        if (eraser) {
+          setPaintingErase(true);
+          clearAllArrays(new Set([k]));
+          return;
+        }
+        if (e.shiftKey && anchor) {
+          const r0 = Math.min(anchor.r, r), r1 = Math.max(anchor.r, r);
+          const c0 = Math.min(anchor.c, c), c1 = Math.max(anchor.c, c);
+          const rect = new Set();
+          for (let rr = r0; rr <= r1; rr++) for (let cc = c0; cc <= c1; cc++) rect.add(key(rr, cc));
+          promptSel(rect);
+          setAnchor(null);
+          return;
+        }
+        setAnchor({r,c});
+        setSelecting(true);
+        setSelection(new Set([k]));
+      }
+
+      function mEnter(r, c) {
+        const k = key(r, c);
+        if (paintingEmpty && emptyMode) { setEmptyFlag(new Set([k]), paintFlag); return; }
+        if (paintingErase && eraser) { clearAllArrays(new Set([k])); return; }
+        if (selecting) setSelection(p => new Set(p).add(k));
+      }
+
+      function globalUp() {
+        if (paintingEmpty) setPaintingEmpty(false);
+        if (paintingErase) setPaintingErase(false);
+        if (selecting) {
+          setSelecting(false);
+          if (selection.size) promptSel(selection);
+          setSelection(new Set());
+        }
+      }
+
+      useEffect(() => {
+        window.addEventListener('mouseup', globalUp);
+        return () => window.removeEventListener('mouseup', globalUp);
+      });
+
+      const doRow = r => {
+        const k = rowKeys(r);
+        if (emptyMode) { setEmptyFlag(k, [...k].some(K => !ensure(K).empty)); return; }
+        if (eraser) { clearAllArrays(k); return; }
+        addLabel(k, prompt(`Label row ${rows[r]}:`), 'row');
+      };
+
+      const doCol = c => {
+        const k = colKeys(c);
+        if (emptyMode) { setEmptyFlag(k, [...k].some(K => !ensure(K).empty)); return; }
+        if (eraser) { clearAllArrays(k); return; }
+        addLabel(k, prompt(`Label column ${c+1}:`), 'col');
+      };
+
+      const edgeKs = () => {
+        const s = new Set();
+        for (let r=0; r<cfg.rows; r++) for (let c=0; c<cfg.cols; c++)
+          if (r===0 || c===0 || r===cfg.rows-1 || c===cfg.cols-1) s.add(key(r,c));
+        return s;
+      };
+
+      const toggleEdge = () => {
+        setEmptyFlag(edgeKs(), !edgeEmpty);
+        setEdgeEmpty(!edgeEmpty);
+      };
+
+      const clearAll = () => { if (confirm('Clear all labels?')) { setLabels({}); setEdgeEmpty(false); } };
+      const activate = m => {
+        if (m==='eraser') { if (!hasLabels) return; setEraser(!eraser); if (!eraser) setEmptyMode(false); }
+        if (m==='empty') { setEmptyMode(!emptyMode); if (!emptyMode) setEraser(false); }
+      };
+
+      const btn = (on, b, onCls, offCls, dis) => `${b} ${dis ? 'opacity-40 cursor-not-allowed' : on ? onCls : offCls}`;
+
+      return (<div className="space-y-5 w-max mx-auto">
+        <div id="controls" className="flex flex-wrap gap-3 items-center justify-center bg-white p-3 rounded-lg shadow-sm">
+          <select value={plate} onChange={e=>{setPlate(+e.target.value); setLabels({}); setEdgeEmpty(false);}} className="border rounded p-2">
+            {Object.keys(PLATE_MAP).map(p=><option key={p} value={p}>{p}-well</option>)}
+          </select>
+          <button onClick={clearAll} className="px-4 py-1.5 bg-red-600 text-white rounded">Clear All</button>
+          <button onClick={toggleEdge} className={btn(edgeEmpty,'px-4 py-1.5 rounded font-medium','bg-indigo-600 text-white','bg-indigo-200 text-black',false)}>Edge Empty {edgeEmpty?'ON':'OFF'}</button>
+          <button onClick={()=>window.print()} className="px-4 py-1.5 bg-gray-700 text-white rounded">Print</button>
+        </div>
+
+        <div id="painting-tools" className="flex flex-wrap gap-3 items-center justify-center bg-slate-100 p-4 rounded-lg shadow-inner">
+          <span className="font-medium">Plate painting:</span>
+          <button onClick={()=>activate('eraser')} disabled={!hasLabels} className={btn(eraser,'px-4 py-1.5 rounded font-medium','bg-yellow-500 text-black','bg-yellow-200 text-black',!hasLabels)}>🩹 Eraser {eraser&&'ON'}</button>
+          <button onClick={()=>activate('empty')} className={btn(emptyMode,'px-4 py-1.5 rounded font-medium','bg-indigo-600 text-white','bg-indigo-200 text-black',false)}>⭕ Empty {emptyMode&&'ON'}</button>
+        </div>
+
+        <div className="rounded-lg border-4 border-gray-600 bg-gray-100 p-4 shadow">
+          <div className="grid" style={{gridTemplateColumns:`auto repeat(${cfg.cols},2.8rem)`}}>
+            <div></div>
+            {Array.from({length:cfg.cols}).map((_,c)=><div key={`hc${c}`} onClick={()=>doCol(c)} className="w-11 h-7 flex items-center justify-center font-semibold bg-gray-400 text-white border border-gray-500 cursor-pointer rounded-sm select-none">{c+1}</div>)}
+            {rows.map((ltr,r)=>(<React.Fragment key={ltr}>
+              <div onClick={()=>doRow(r)} className="w-7 h-11 flex items-center justify-center font-semibold bg-gray-400 text-white border border-gray-500 cursor-pointer rounded-sm select-none">{ltr}</div>
+              {Array.from({length:cfg.cols}).map((_,c)=>{
+                const k=key(r,c); const o=ensure(k);
+                const txt=[...o.row,...o.col,...o.cell]; const sel=selection.has(k);
+                return (<div key={k} onMouseDown={e=>mDown(e,r,c)} onMouseEnter={()=>mEnter(r,c)} className={`relative flex items-center justify-center m-1 aspect-square rounded border ${sel?'border-blue-400 bg-blue-100':'border-transparent'} ${o.empty?'bg-gray-300 empty-well':''}`} style={{width:'2.8rem',cursor:emptyMode?'pointer':eraser?'crosshair':'default'}}>
+                  <div className="absolute inset-0 flex items-center justify-center pointer-events-none">{o.empty?<div className="w-[85%] h-[2px] bg-gray-600 rotate-45"></div>:<div className="w-[88%] h-[88%] rounded-full border border-slate-600/60"></div>}</div>
+                  {!o.empty&&(txt.length?<div className="text-[0.55rem] leading-[0.6rem] text-center whitespace-pre pointer-events-none z-10">{txt.join('\n')}</div>:<span className="text-[0.6rem] text-slate-500 z-10 pointer-events-none">{rows[r]}{c+1}</span>)}
+                </div>);
+              })}
+            </React.Fragment>))}
+          </div>
+        </div>
+      </div>);
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<PlateLabeler/>);
+  </script>
+</body>
+</html>
