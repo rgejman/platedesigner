@@ -7,14 +7,40 @@
   <style>
     body { font-family: Inter, Helvetica, Arial, sans-serif; }
   @media print {
-    /* keep controls hidden */
-    #controls, #painting-tools { display: none; }
-    body { margin: 0; }
+    /* Hide everything except the plate */
+    body > div:first-child > footer,
+    .max-w-7xl > div:first-child,
+    .flex-1 > div:not(.rounded-lg.border-4) {
+      display: none !important;
+    }
+    
+    /* Center the plate on the page */
+    .max-w-7xl {
+      max-width: none !important;
+      margin: 0 !important;
+      padding: 20px;
+      justify-content: center;
+    }
+    
+    .flex-1 {
+      flex: none !important;
+      width: auto !important;
+    }
+    
+    body { 
+      margin: 0; 
+      background: white !important;
+    }
 
-    /* NEW: force dim + grayscale so empty wells remain visible on printers
-       that drop background colors or ignore opacity */
+    /* Ensure empty wells remain visible on printers */
     .empty-well {
       filter: grayscale(100%) opacity(0.35);
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+    
+    /* Make sure plate colors print properly */
+    .bg-green-100 {
       -webkit-print-color-adjust: exact;
       print-color-adjust: exact;
     }
@@ -24,12 +50,14 @@
 <body class="bg-slate-50 p-6 min-h-screen flex flex-col items-center text-sm select-none">
   <div id="root" class="flex-grow flex justify-center"></div>
   <footer class="mt-6 text-center text-xs text-slate-500 select-none">
-    © Ron&nbsp;S.&nbsp;Gejman · <a href="https://ron.gejman.com" target="_blank" rel="noopener" class="underline hover:text-slate-700">ron.gejman.com</a>
+    © 100% Vibe Coded by Ron&nbsp;S.&nbsp;Gejman · <a href="https://ron.gejman.com" target="_blank" rel="noopener" class="underline hover:text-slate-700">ron.gejman.com</a>
   </footer>
 
   <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+  <script src="https://unpkg.com/lz-string@1.5.0/libs/lz-string.min.js"></script>
 
   <script type="text/babel" data-presets="env,react">
     const { useState, useEffect, useMemo } = React;
@@ -49,7 +77,12 @@
       const [emptyMode,setEmptyMode]=useState(false);
       const [paintingEmpty,setPaintingEmpty]=useState(false);
       const [paintFlag,setPaintFlag]=useState(false);
-      const [edgeEmpty,setEdgeEmpty]=useState(false);
+      const [edgeEmpty,setEdgeEmpty]=useState(true);
+      
+      const [savedPlates,setSavedPlates]=useState([]);
+      const [currentPlateName,setCurrentPlateName]=useState('');
+      const [showSidebar,setShowSidebar]=useState(true);
+      const [showInstructions,setShowInstructions]=useState(false);
 
       const cfg = PLATE_MAP[plate];
       const rows = alpha(cfg.rows);
@@ -57,6 +90,210 @@
       const ensure = (k, p=labels) => ({row:[],col:[],cell:[],empty:false, ...p[k]});
 
       const hasLabels = useMemo(() => Object.values(labels).some(o => o.row.length || o.col.length || o.cell.length), [labels]);
+
+      // Load saved plates on mount and check for shared plate in URL
+      useEffect(() => {
+        // Check for shared plate data in URL (both old 'data' and new 'd' parameters for backward compatibility)
+        const urlParams = new URLSearchParams(window.location.search);
+        const compressedData = urlParams.get('d');
+        const legacyData = urlParams.get('data');
+        
+        if (compressedData || legacyData) {
+          try {
+            let plateData;
+            if (compressedData) {
+              // New compressed format
+              const decompressed = LZString.decompressFromEncodedURIComponent(compressedData);
+              plateData = JSON.parse(decompressed);
+            } else {
+              // Legacy base64 format
+              plateData = JSON.parse(atob(legacyData));
+            }
+            
+            setPlate(plateData.plate);
+            setLabels(plateData.labels);
+            setEdgeEmpty(plateData.edgeEmpty || false);
+            setCurrentPlateName(plateData.name || '');
+            
+            // Clear the URL parameter after loading
+            window.history.replaceState({}, document.title, window.location.pathname);
+            return; // Don't load saved plates if we're loading a shared plate
+          } catch (error) {
+            console.error('Error loading shared plate:', error);
+          }
+        }
+
+        const saved = JSON.parse(localStorage.getItem('savedPlates') || '[]');
+        // Add IDs to plates that don't have them (for backward compatibility)
+        const platesWithIds = saved.map(plate => ({
+          ...plate,
+          id: plate.id || `plate_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+          isCurrent: false // Reset current status on load
+        }));
+        setSavedPlates(platesWithIds);
+      }, []);
+
+      // Create initial untitled plate on app start
+      useEffect(() => {
+        const plateData = {
+          id: `plate_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+          name: `Untitled ${plate}-well`,
+          plate,
+          labels,
+          edgeEmpty: true,
+          timestamp: Date.now(),
+          isUnsaved: true,
+          isCurrent: true
+        };
+        
+        setSavedPlates(prev => {
+          // Only create initial plate if no plates exist
+          if (prev.length === 0) {
+            const newSaved = [plateData];
+            localStorage.setItem('savedPlates', JSON.stringify(newSaved));
+            return newSaved;
+          }
+          return prev;
+        });
+      }, []); // Only run once on mount
+
+      // Auto-save when plate changes
+      useEffect(() => {
+        // Don't save on initial load, only save when there are actual changes
+        if (Object.keys(labels).length > 0 || edgeEmpty || currentPlateName) {
+          const plateData = {
+            name: currentPlateName || `Untitled ${plate}-well`,
+            plate,
+            labels,
+            edgeEmpty,
+            timestamp: Date.now(),
+            isUnsaved: !currentPlateName,
+            isCurrent: true
+          };
+          
+          setSavedPlates(prev => {
+            const newSaved = prev.map(p => ({ ...p, isCurrent: false })); // Mark all as not current
+            const currentIndex = currentPlateName ? 
+              newSaved.findIndex(p => p.name === currentPlateName) :
+              newSaved.findIndex(p => p.isUnsaved);
+            
+            if (currentIndex >= 0) {
+              newSaved[currentIndex] = plateData;
+            } else {
+              // Remove any existing untitled plates and add this one
+              const filteredSaved = newSaved.filter(p => !p.isUnsaved);
+              filteredSaved.unshift(plateData);
+              return filteredSaved.slice(0, 20);
+            }
+            
+            localStorage.setItem('savedPlates', JSON.stringify(newSaved));
+            return newSaved;
+          });
+        }
+      }, [labels, edgeEmpty, plate, currentPlateName]);
+
+      // Apply edge empty when edge empty state is true (for new plates)
+      useEffect(() => {
+        if (edgeEmpty) {
+          applyEdgeEmpty();
+        }
+      }, [plate]); // Run when plate size changes (new plates)
+
+      const updatePlateName = (newName) => {
+        const trimmedName = newName.trim();
+        setCurrentPlateName(trimmedName);
+        
+        // Just update the current plate's name, don't create new plates
+        setSavedPlates(prev => {
+          const newSaved = [...prev];
+          const currentIndex = currentPlateName ? 
+            newSaved.findIndex(p => p.name === currentPlateName) :
+            newSaved.findIndex(p => p.isUnsaved);
+          
+          if (currentIndex >= 0) {
+            newSaved[currentIndex] = {
+              ...newSaved[currentIndex],
+              name: trimmedName || `Untitled ${plate}-well`,
+              isUnsaved: !trimmedName,
+              timestamp: Date.now()
+            };
+            localStorage.setItem('savedPlates', JSON.stringify(newSaved));
+          }
+          return newSaved;
+        });
+      };
+
+      const loadPlateData = (plateData) => {
+        setPlate(plateData.plate);
+        setLabels(plateData.labels);
+        setEdgeEmpty(plateData.edgeEmpty || false);
+        setCurrentPlateName(plateData.isUnsaved ? '' : plateData.name);
+        
+        // Mark this plate as current and all others as not current
+        setSavedPlates(prev => {
+          const newSaved = prev.map(plate => ({
+            ...plate,
+            isCurrent: plate.id === plateData.id || (plate.name === plateData.name && !plateData.isUnsaved)
+          }));
+          localStorage.setItem('savedPlates', JSON.stringify(newSaved));
+          return newSaved;
+        });
+      };
+
+      const renamePlate = (index) => {
+        const oldName = savedPlates[index].name;
+        const newName = prompt('Enter new name:', oldName);
+        if (!newName || newName.trim() === oldName) return;
+        
+        setSavedPlates(prev => {
+          const newSaved = [...prev];
+          newSaved[index] = { ...newSaved[index], name: newName.trim(), isUnsaved: false };
+          localStorage.setItem('savedPlates', JSON.stringify(newSaved));
+          return newSaved;
+        });
+        
+        // Update current plate name if this is the active plate
+        if (currentPlateName === oldName) {
+          setCurrentPlateName(newName.trim());
+        }
+      };
+
+      const deletePlate = (index) => {
+        setSavedPlates(prev => {
+          const newSaved = prev.filter((_, i) => i !== index);
+          localStorage.setItem('savedPlates', JSON.stringify(newSaved));
+          return newSaved;
+        });
+      };
+
+      const newPlate = () => {
+        // Clear current state
+        setPlate(96);
+        setLabels({});
+        setEdgeEmpty(true);
+        setCurrentPlateName('');
+        
+        // Create new untitled plate in saved plates
+        const newPlateData = {
+          id: `plate_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+          name: 'Untitled 96-well',
+          plate: 96,
+          labels: {},
+          edgeEmpty: true,
+          timestamp: Date.now(),
+          isUnsaved: true,
+          isCurrent: true
+        };
+        
+        setSavedPlates(prev => {
+          // Mark all other plates as not current
+          const updatedSaved = prev.map(plate => ({ ...plate, isCurrent: false }));
+          const newSaved = [newPlateData, ...updatedSaved];
+          if (newSaved.length > 20) newSaved.splice(20);
+          localStorage.setItem('savedPlates', JSON.stringify(newSaved));
+          return newSaved;
+        });
+      };
 
       const mutate = (keys, fn) => setLabels(prev => {
         const n = {...prev};
@@ -67,14 +304,17 @@
       const addLabel = (keys, val, type) => { if (!val) return; mutate(keys, o => { if (o.empty) return; o[type] = [...new Set([...o[type], val])]; }); };
       const clearAllArrays = keys => mutate(keys, o => { o.row=[]; o.col=[]; o.cell=[]; });
       const clearCellOnly = keys => mutate(keys, o => { o.cell=[]; });
+      const clearIndividualCell = keys => mutate(keys, o => { o.cell=[]; o.row=[]; o.col=[]; });
       const setEmptyFlag = (keys, f) => mutate(keys, o => { o.empty=f; if(f) o.cell=[]; });
 
       const rowKeys = r => new Set(Array.from({length:cfg.cols}, (_,c) => key(r,c)));
       const colKeys = c => new Set(Array.from({length:cfg.rows}, (_,r) => key(r,c)));
 
       const promptSel = keys => {
-        const ex = [...keys].some(k => { const o = labels[k]; return o && (o.cell.length || o.row.length || o.col.length); });
-        const t = prompt(ex ? "Enter label (or 'clear'):" : "Enter label:");
+        const firstKey = [...keys][0];
+        const existing = ensure(firstKey);
+        const currentLabels = existing.cell.join(', ');
+        const t = prompt(currentLabels ? `Edit label (or 'clear' to remove):` : "Enter label:", currentLabels);
         if (t === null) return;
         const v = t.trim();
         if (v.toLowerCase() === 'clear') clearCellOnly(keys);
@@ -93,7 +333,7 @@
         }
         if (eraser) {
           setPaintingErase(true);
-          clearAllArrays(new Set([k]));
+          clearIndividualCell(new Set([k]));
           return;
         }
         if (e.shiftKey && anchor) {
@@ -103,17 +343,21 @@
           for (let rr = r0; rr <= r1; rr++) for (let cc = c0; cc <= c1; cc++) rect.add(key(rr, cc));
           promptSel(rect);
           setAnchor(null);
+          setSelecting(false);
+          setSelection(new Set());
           return;
         }
         setAnchor({r,c});
-        setSelecting(true);
-        setSelection(new Set([k]));
+        if (!e.shiftKey) {
+          setSelecting(true);
+          setSelection(new Set([k]));
+        }
       }
 
       function mEnter(r, c) {
         const k = key(r, c);
         if (paintingEmpty && emptyMode) { setEmptyFlag(new Set([k]), paintFlag); return; }
-        if (paintingErase && eraser) { clearAllArrays(new Set([k])); return; }
+        if (paintingErase && eraser) { clearIndividualCell(new Set([k])); return; }
         if (selecting) setSelection(p => new Set(p).add(k));
       }
 
@@ -136,14 +380,42 @@
         const k = rowKeys(r);
         if (emptyMode) { setEmptyFlag(k, [...k].some(K => !ensure(K).empty)); return; }
         if (eraser) { clearAllArrays(k); return; }
-        addLabel(k, prompt(`Label row ${rows[r]}:`), 'row');
+        // Find existing row labels from any cell in this row
+        let currentLabels = '';
+        for (const cellKey of k) {
+          const existing = ensure(cellKey);
+          if (existing.row.length > 0) {
+            currentLabels = existing.row.join(', ');
+            break;
+          }
+        }
+        const label = prompt(currentLabels ? `Edit row ${rows[r]} label (or 'clear' to remove):` : `Label row ${rows[r]}:`, currentLabels);
+        if (label !== null) {
+          const v = label.trim();
+          if (v.toLowerCase() === 'clear') clearAllArrays(k);
+          else if (v) addLabel(k, v, 'row');
+        }
       };
 
       const doCol = c => {
         const k = colKeys(c);
         if (emptyMode) { setEmptyFlag(k, [...k].some(K => !ensure(K).empty)); return; }
         if (eraser) { clearAllArrays(k); return; }
-        addLabel(k, prompt(`Label column ${c+1}:`), 'col');
+        // Find existing column labels from any cell in this column
+        let currentLabels = '';
+        for (const cellKey of k) {
+          const existing = ensure(cellKey);
+          if (existing.col.length > 0) {
+            currentLabels = existing.col.join(', ');
+            break;
+          }
+        }
+        const label = prompt(currentLabels ? `Edit column ${c+1} label (or 'clear' to remove):` : `Label column ${c+1}:`, currentLabels);
+        if (label !== null) {
+          const v = label.trim();
+          if (v.toLowerCase() === 'clear') clearAllArrays(k);
+          else if (v) addLabel(k, v, 'col');
+        }
       };
 
       const edgeKs = () => {
@@ -153,51 +425,351 @@
         return s;
       };
 
+      const applyEdgeEmpty = () => {
+        setEmptyFlag(edgeKs(), true);
+      };
+
       const toggleEdge = () => {
         setEmptyFlag(edgeKs(), !edgeEmpty);
         setEdgeEmpty(!edgeEmpty);
       };
 
-      const clearAll = () => { if (confirm('Clear all labels?')) { setLabels({}); setEdgeEmpty(false); } };
+      const clearAll = () => { if (confirm('Clear all labels?')) { setLabels({}); } };
       const activate = m => {
-        if (m==='eraser') { if (!hasLabels) return; setEraser(!eraser); if (!eraser) setEmptyMode(false); }
-        if (m==='empty') { setEmptyMode(!emptyMode); if (!emptyMode) setEraser(false); }
+        if (m==='eraser') { 
+          if (eraser) {
+            setEraser(false); // Turn off eraser
+          } else {
+            setEraser(true); // Turn on eraser
+            setEmptyMode(false); // Turn off empty mode
+          }
+        }
+        if (m==='empty') { 
+          if (emptyMode) {
+            setEmptyMode(false); // Turn off empty mode
+          } else {
+            setEmptyMode(true); // Turn on empty mode
+            setEraser(false); // Turn off eraser
+          }
+        }
+      };
+
+      const exportToPNG = () => {
+        const plateElement = document.querySelector('.rounded-lg.border-4.border-gray-600');
+        if (!plateElement) return;
+
+        html2canvas(plateElement, {
+          backgroundColor: '#f3f4f6',
+          scale: 2,
+          useCORS: true,
+          allowTaint: true
+        }).then(canvas => {
+          const link = document.createElement('a');
+          link.download = `${currentPlateName || `Untitled ${plate}-well`}.png`;
+          link.href = canvas.toDataURL();
+          link.click();
+        }).catch(error => {
+          console.error('Error exporting to PNG:', error);
+          alert('Error exporting to PNG. Please try again.');
+        });
+      };
+
+      const handlePrint = () => {
+        const originalTitle = document.title;
+        document.title = currentPlateName || `Untitled ${plate}-well`;
+        
+        // Temporarily hide non-plate elements for clean print/PDF
+        const elementsToHide = document.querySelectorAll('body > div:first-child > footer, .max-w-7xl > div:first-child, .flex-1 > div:not(.rounded-lg.border-4)');
+        elementsToHide.forEach(el => el.style.display = 'none');
+        
+        window.print();
+        
+        // Restore elements after print dialog
+        setTimeout(() => {
+          elementsToHide.forEach(el => el.style.display = '');
+          document.title = originalTitle;
+        }, 1000);
+      };
+
+      const shareePlate = async () => {
+        const plateData = {
+          name: currentPlateName || `Untitled ${plate}-well`,
+          plate,
+          labels,
+          edgeEmpty
+        };
+        
+        // Compress the data using LZ-string compression
+        const compressedData = LZString.compressToEncodedURIComponent(JSON.stringify(plateData));
+        const longUrl = `https://ron.gejman.com/platedesigner.html?d=${compressedData}`;
+        
+        let finalUrl = longUrl;
+        let isShortened = false;
+        
+        try {
+          // Try to shorten with is.gd (no API key required, no rate limiting for reasonable use)
+          const response = await fetch('https://is.gd/create.php', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: `format=simple&url=${encodeURIComponent(longUrl)}`
+          });
+          
+          if (response.ok) {
+            const shortUrl = await response.text();
+            if (shortUrl.startsWith('https://is.gd/') && !shortUrl.includes('Error')) {
+              finalUrl = shortUrl.trim();
+              isShortened = true;
+            }
+          }
+        } catch (error) {
+          console.warn('is.gd shortening failed, using compressed URL as fallback:', error);
+        }
+        
+        // Copy to clipboard
+        const copyToClipboard = (url, message) => {
+          navigator.clipboard.writeText(url).then(() => {
+            alert(message);
+          }).catch(() => {
+            // Fallback for older browsers
+            const textArea = document.createElement('textarea');
+            textArea.value = url;
+            document.body.appendChild(textArea);
+            textArea.select();
+            document.execCommand('copy');
+            document.body.removeChild(textArea);
+            alert(message);
+          });
+        };
+        
+        const message = isShortened ? 
+          'Shortened share link copied to clipboard!' : 
+          'Compressed share link copied to clipboard!';
+          
+        copyToClipboard(finalUrl, message);
       };
 
       const btn = (on, b, onCls, offCls, dis) => `${b} ${dis ? 'opacity-40 cursor-not-allowed' : on ? onCls : offCls}`;
 
-      return (<div className="space-y-5 w-max mx-auto">
-        <div id="controls" className="flex flex-wrap gap-3 items-center justify-center bg-white p-3 rounded-lg shadow-sm">
-          <select value={plate} onChange={e=>{setPlate(+e.target.value); setLabels({}); setEdgeEmpty(false);}} className="border rounded p-2">
-            {Object.keys(PLATE_MAP).map(p=><option key={p} value={p}>{p}-well</option>)}
-          </select>
-          <button onClick={clearAll} className="px-4 py-1.5 bg-red-600 text-white rounded">Clear All</button>
-          <button onClick={toggleEdge} className={btn(edgeEmpty,'px-4 py-1.5 rounded font-medium','bg-indigo-600 text-white','bg-indigo-200 text-black',false)}>Edge Empty {edgeEmpty?'ON':'OFF'}</button>
-          <button onClick={()=>window.print()} className="px-4 py-1.5 bg-gray-700 text-white rounded">Print</button>
+      // Render tiny schematic of plate layout
+      const renderSchematic = (plateData) => {
+        const plateCfg = PLATE_MAP[plateData.plate];
+        const plateRows = alpha(plateCfg.rows);
+        
+        return (
+          <div className="w-16 h-12 bg-white border border-gray-300 rounded p-1 flex flex-col justify-center">
+            <div className="grid gap-px" style={{gridTemplateColumns: `repeat(${plateCfg.cols}, 1fr)`}}>
+              {plateRows.map((row, r) =>
+                Array.from({length: plateCfg.cols}).map((_, c) => {
+                  const k = `${r}-${c}`;
+                  const wellData = plateData.labels[k] || {row:[], col:[], cell:[], empty: false};
+                  const hasContent = wellData.row.length > 0 || wellData.col.length > 0 || wellData.cell.length > 0;
+                  const isEmpty = wellData.empty;
+                  
+                  return (
+                    <div 
+                      key={k} 
+                      className={`w-1 h-1 rounded-full ${
+                        isEmpty ? 'bg-gray-400' : 
+                        hasContent ? 'bg-blue-500' : 
+                        'bg-gray-200'
+                      }`}
+                    />
+                  );
+                })
+              )}
+            </div>
+          </div>
+        );
+      };
+
+      return (<div className="flex gap-6 max-w-7xl mx-auto">
+        {/* Sidebar */}
+        <div className="w-80 flex-shrink-0">
+          <div className="bg-white rounded-lg shadow-sm h-full">
+            <div className="p-3 border-b flex items-center justify-between">
+              <div className="text-sm font-medium text-gray-700">Saved Plates</div>
+              <button onClick={newPlate} className="px-2 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 text-xs" title="Create a new blank plate">🆕 New</button>
+            </div>
+            <div className="p-3 space-y-2">
+              {savedPlates.map((savedPlate, index) => {
+                const isCurrentPlate = savedPlate.isCurrent || (currentPlateName && savedPlate.name === currentPlateName);
+                return (
+                <div key={index} className={`rounded p-2 text-xs border hover:border-gray-300 ${isCurrentPlate ? 'bg-blue-100 border-blue-300' : 'bg-gray-50'}`}>
+                  <div className="flex gap-2 items-start">
+                    <button
+                      onClick={() => loadPlateData(savedPlate)}
+                      className="flex-1 text-left hover:bg-gray-100 p-1 rounded"
+                      title="Click to load this plate"
+                    >
+                      <div className={`font-medium ${savedPlate.isUnsaved ? 'text-orange-600' : 'text-gray-900'}`}>
+                        {savedPlate.name}
+                      </div>
+                      <div className="text-gray-500">
+                        {savedPlate.plate}-well • {new Date(savedPlate.timestamp).toLocaleDateString()}
+                      </div>
+                    </button>
+                    {renderSchematic(savedPlate)}
+                  </div>
+                  <div className="flex gap-1 justify-end mt-2">
+                    <button
+                      onClick={() => renamePlate(index)}
+                      className="px-2 py-1 text-xs bg-blue-100 text-blue-700 hover:bg-blue-200 rounded"
+                      title="Rename this plate"
+                    >
+                      ✏️ Rename
+                    </button>
+                    <button
+                      onClick={() => deletePlate(index)}
+                      className="px-2 py-1 text-xs bg-red-100 text-red-700 hover:bg-red-200 rounded"
+                      title="Delete this plate"
+                    >
+                      🗑️ Delete
+                    </button>
+                  </div>
+                </div>
+                );
+              })}
+              {savedPlates.length === 0 && (
+                <div className="text-gray-500 text-center py-4">No saved plates</div>
+              )}
+            </div>
+          </div>
         </div>
 
-        <div id="painting-tools" className="flex flex-wrap gap-3 items-center justify-center bg-slate-100 p-4 rounded-lg shadow-inner">
-          <span className="font-medium">Plate painting:</span>
-          <button onClick={()=>activate('eraser')} disabled={!hasLabels} className={btn(eraser,'px-4 py-1.5 rounded font-medium','bg-yellow-500 text-black','bg-yellow-200 text-black',!hasLabels)}>🩹 Eraser {eraser&&'ON'}</button>
-          <button onClick={()=>activate('empty')} className={btn(emptyMode,'px-4 py-1.5 rounded font-medium','bg-indigo-600 text-white','bg-indigo-200 text-black',false)}>⭕ Empty {emptyMode&&'ON'}</button>
-        </div>
+        {/* Main Content */}
+        <div className="flex-1 space-y-5">
+          <div id="instructions" className="bg-blue-50 border border-blue-200 rounded-lg">
+            <button 
+              onClick={() => setShowInstructions(!showInstructions)}
+              className="w-full p-4 text-left flex items-center justify-between hover:bg-blue-100 rounded-lg"
+            >
+              <h3 className="font-bold text-blue-800">How to Use</h3>
+              <span className="text-blue-600">{showInstructions ? '▼' : '▶'}</span>
+            </button>
+            {showInstructions && (
+              <div className="px-4 pb-4 space-y-2 text-blue-700 text-sm">
+                <div><strong>Plate Management:</strong></div>
+                <div className="ml-4 space-y-1">
+                  <div>• Name your plate in the Title field for easy identification</div>
+                  <div>• Choose plate size (6, 12, 24, 48, 96, or 384 wells)</div>
+                  <div>• All plates auto-save to the sidebar for quick access</div>
+                </div>
+                
+                <div><strong>Labeling Wells:</strong></div>
+                <div className="ml-4 space-y-1">
+                  <div>• Click individual wells to add labels</div>
+                  <div>• Drag to select multiple wells at once</div>
+                  <div>• Use Shift+click to select rectangular areas</div>
+                  <div>• Click row letters (A, B, C...) to label entire rows</div>
+                  <div>• Click column numbers (1, 2, 3...) to label entire columns</div>
+                </div>
+                
+                <div><strong>Tools:</strong></div>
+                <div className="ml-4 space-y-1">
+                  <div>• <strong>Empty mode (⧸):</strong> Click/drag to mark wells as empty (diagonal line)</div>
+                  <div>• <strong>Eraser (⬜):</strong> Click/drag to remove all labels from wells</div>
+                  <div>• <strong>Edge Empty:</strong> Quickly mark/unmark all edge wells as empty</div>
+                  <div>• <strong>Clear All:</strong> Remove all labels and markings</div>
+                </div>
+                
+                <div><strong>Export & Share:</strong></div>
+                <div className="ml-4 space-y-1">
+                  <div>• <strong>Print/PDF:</strong> Print directly or save as PDF</div>
+                  <div>• <strong>PNG:</strong> Export high-quality image of your plate</div>
+                  <div>• <strong>Share:</strong> Generate shareable link to send your plate design to others</div>
+                </div>
+              </div>
+            )}
+          </div>
 
-        <div className="rounded-lg border-4 border-gray-600 bg-gray-100 p-4 shadow">
-          <div className="grid" style={{gridTemplateColumns:`auto repeat(${cfg.cols},2.8rem)`}}>
+          <div id="controls" className="flex flex-wrap gap-4 items-center justify-center bg-white p-3 rounded-lg shadow-sm">
+            <div className="flex items-center gap-2">
+              <label className="text-sm font-medium text-gray-700">Title:</label>
+              <input 
+                type="text" 
+                value={currentPlateName || ''} 
+                onChange={e => updatePlateName(e.target.value)}
+                placeholder="Enter plate name"
+                className="text-sm bg-gray-50 border border-gray-300 px-2 py-1 rounded w-40 focus:bg-white focus:border-blue-500 outline-none"
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="text-sm font-medium text-gray-700">Size:</label>
+              <select value={plate} onChange={e=>{setPlate(+e.target.value);}} className="border rounded p-2">
+                {Object.keys(PLATE_MAP).map(p=><option key={p} value={p}>{p}-well</option>)}
+              </select>
+            </div>
+            <div className="border-l border-gray-300 h-8"></div>
+            
+            <span className="text-sm font-medium text-gray-700">Tools:</span>
+            <button onClick={()=>activate('eraser')} className={btn(eraser,'px-3 py-1.5 rounded font-medium hover:opacity-90','bg-indigo-600 text-white','bg-indigo-200 text-black',false)} title="Click and drag to remove labels from wells">⬜</button>
+            <button onClick={()=>activate('empty')} className={btn(emptyMode,'px-3 py-1.5 rounded font-medium hover:opacity-90','bg-indigo-600 text-white','bg-indigo-200 text-black',false)} title="Click and drag to mark wells as empty">⧸</button>
+            
+            <div className="border-l border-gray-300 h-8"></div>
+            
+            <span className="text-sm font-medium text-gray-700">Options:</span>
+            <button onClick={clearAll} className="px-3 py-1.5 bg-red-600 text-white rounded hover:bg-red-700 text-sm" title="Remove all labels and empty markings">Clear All</button>
+            <button onClick={toggleEdge} className="px-3 py-1.5 rounded font-medium hover:bg-gray-100 border border-gray-300 bg-white text-black flex items-center gap-2 text-sm" title="Mark/unmark all edge wells as empty">
+              <span className={`w-4 h-4 border-2 border-gray-400 rounded flex items-center justify-center ${edgeEmpty ? 'bg-green-500 border-green-500' : 'bg-white'}`}>
+                {edgeEmpty && <span className="text-white text-xs">✓</span>}
+              </span>
+              Edge Empty
+            </button>
+            <button onClick={handlePrint} className="px-3 py-1.5 bg-gray-700 text-white rounded hover:bg-gray-800 text-sm" title="Print plate layout or save as PDF">🖨️ Print/PDF</button>
+            <button onClick={exportToPNG} className="px-3 py-1.5 bg-green-600 text-white rounded hover:bg-green-700 text-sm" title="Export plate as PNG image">📷 PNG</button>
+            <button onClick={shareePlate} className="px-3 py-1.5 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm" title="Share plate via URL link">🔗 Share</button>
+          </div>
+
+          <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 text-xs">
+            <div className="font-bold text-gray-700 mb-2">Legend:</div>
+            <div className="flex flex-wrap gap-4 items-center">
+              <div className="flex items-center gap-1">
+                <div className="w-4 h-4 rounded-full border border-slate-600/60"></div>
+                <span>Normal well</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <div className="w-4 h-4 bg-gray-300 relative">
+                  <div className="absolute inset-0 flex items-center justify-center">
+                    <div className="w-3 h-[1px] bg-gray-600 rotate-45"></div>
+                  </div>
+                </div>
+                <span>Empty well</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <div className="w-4 h-4 border border-blue-400 bg-blue-100"></div>
+                <span>Selected well</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <div className="w-4 h-4 bg-gray-400 text-white text-[8px] flex items-center justify-center font-bold">A</div>
+                <span>Row header (click to label row)</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <div className="w-4 h-4 bg-gray-400 text-white text-[8px] flex items-center justify-center font-bold">1</div>
+                <span>Column header (click to label column)</span>
+              </div>
+            </div>
+          </div>
+
+        <div className="rounded-lg border-4 border-gray-600 bg-gray-100 p-4 shadow w-fit">
+          <div className="grid gap-1 w-fit" style={{gridTemplateColumns:`1.75rem repeat(${cfg.cols},3rem)`}}>
             <div></div>
-            {Array.from({length:cfg.cols}).map((_,c)=><div key={`hc${c}`} onClick={()=>doCol(c)} className="w-11 h-7 flex items-center justify-center font-semibold bg-gray-400 text-white border border-gray-500 cursor-pointer rounded-sm select-none">{c+1}</div>)}
+            {Array.from({length:cfg.cols}).map((_,c)=><div key={`hc${c}`} onClick={()=>doCol(c)} className="h-7 flex items-center justify-center font-semibold bg-gray-400 text-white border border-gray-500 cursor-pointer rounded-sm select-none" style={{width:'3rem'}}>{c+1}</div>)}
             {rows.map((ltr,r)=>(<React.Fragment key={ltr}>
-              <div onClick={()=>doRow(r)} className="w-7 h-11 flex items-center justify-center font-semibold bg-gray-400 text-white border border-gray-500 cursor-pointer rounded-sm select-none">{ltr}</div>
+              <div onClick={()=>doRow(r)} className="w-7 h-12 flex items-center justify-center font-semibold bg-gray-400 text-white border border-gray-500 cursor-pointer rounded-sm select-none">{ltr}</div>
               {Array.from({length:cfg.cols}).map((_,c)=>{
                 const k=key(r,c); const o=ensure(k);
                 const txt=[...o.row,...o.col,...o.cell]; const sel=selection.has(k);
-                return (<div key={k} onMouseDown={e=>mDown(e,r,c)} onMouseEnter={()=>mEnter(r,c)} className={`relative flex items-center justify-center m-1 aspect-square rounded border ${sel?'border-blue-400 bg-blue-100':'border-transparent'} ${o.empty?'bg-gray-300 empty-well':''}`} style={{width:'2.8rem',cursor:emptyMode?'pointer':eraser?'crosshair':'default'}}>
+                const hasLabels = txt.length > 0;
+                return (<div key={k} onMouseDown={e=>mDown(e,r,c)} onMouseEnter={()=>mEnter(r,c)} className={`relative flex items-center justify-center aspect-square rounded border ${sel?'border-blue-400 bg-blue-100':'border-transparent'} ${o.empty?'bg-gray-300 empty-well':hasLabels?'bg-green-100':''}`} style={{width:'3rem',cursor:emptyMode?'pointer':eraser?'crosshair':'default'}}>
                   <div className="absolute inset-0 flex items-center justify-center pointer-events-none">{o.empty?<div className="w-[85%] h-[2px] bg-gray-600 rotate-45"></div>:<div className="w-[88%] h-[88%] rounded-full border border-slate-600/60"></div>}</div>
                   {!o.empty&&(txt.length?<div className="text-[0.55rem] leading-[0.6rem] text-center whitespace-pre pointer-events-none z-10">{txt.join('\n')}</div>:<span className="text-[0.6rem] text-slate-500 z-10 pointer-events-none">{rows[r]}{c+1}</span>)}
                 </div>);
               })}
             </React.Fragment>))}
           </div>
+        </div>
         </div>
       </div>);
     }
